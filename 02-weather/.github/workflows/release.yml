@@ -1,0 +1,73 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.verify.outputs.skip }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "version=v$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+      - id: verify
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/${{ steps.version.outputs.version }}$"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: check
+    if: needs.check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun test
+
+  create-release:
+    needs: [check, test]
+    if: needs.check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check.outputs.version }}
+          generate_release_notes: true
+          body: "Binario generado con bun build --compile."
+
+  build:
+    needs: [check, create-release]
+    if: needs.check.outputs.skip == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bun-windows-x64, bun-linux-x64, bun-linux-arm64, bun-darwin-x64, bun-darwin-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun build --compile index.ts --target ${{ matrix.target }} --outfile weather
+      - name: Rename artifact
+        run: mv weather "weather-${{ matrix.target }}${{ matrix.target == 'bun-windows-x64' && '.exe' || '' }}"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check.outputs.version }}
+          files: weather-${{ matrix.target }}*
